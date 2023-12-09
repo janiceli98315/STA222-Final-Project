@@ -1,0 +1,271 @@
+---
+title: "STA222 FP"
+output: html_document
+date: "2023-11-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Data Preprocessing
+
+```{r}
+library(KMsurv)
+library(survival)
+library(ggplot2)
+library(dplyr)
+library(MASS)
+
+data("cancer")
+rotterdam1 <- rotterdam
+
+## Convert categorical variables to factors
+rotterdam1$year <- factor(rotterdam1$year)
+rotterdam1$meno <- factor(rotterdam1$meno, levels = c(0, 1), 
+                          labels = c("premenopausal", "postmenopausal"))
+rotterdam1$hormon <- factor(rotterdam1$hormon, levels = c(0, 1), 
+                          labels = c("No", "Yes"))
+rotterdam1$chemo <- factor(rotterdam1$chemo, levels = c(0, 1), 
+                          labels = c("No", "Yes"))
+rotterdam1$grade <- factor(rotterdam1$grade)
+
+
+rotterdam1$nodes_cate <- cut(rotterdam1$nodes, breaks = c(-Inf, 1, 4, Inf), 
+                           labels = c("0-1", "2-4", "above 4"))
+summary(rotterdam1$nodes_cate)
+
+rotterdam1$er_cate <- cut(rotterdam1$er, breaks = c(-Inf, 20, 130, Inf), 
+                           labels = c("0-20", "21-130", "above 130"))
+summary(rotterdam1$er_cate)
+
+rotterdam1$pgr_cate <- cut(rotterdam1$pgr, breaks = c(-Inf, 10, 120, Inf), 
+                           labels = c("0-10", "11-120", "above 120"))
+summary(rotterdam1$pgr_cate)
+
+## New dataset
+#set the final observation time, dtime = Time To Death Or Last follow-up
+rotterdam2 <- tmerge(rotterdam1, rotterdam1, pid, tstop=dtime)
+#set time until relapse
+rotterdam2 <- tmerge(rotterdam2, rotterdam1, pid, newrecur=tdc(rtime))
+#status at the end, either they dead or they were not censored
+status <- as.integer(with(rotterdam2, (tstop == dtime & death)))
+#put together
+rotterdam2 <- data.frame(rotterdam2,status)
+
+# Build up the survial object
+## deathtime-death
+rotterdam1.surv <- with(rotterdam1,Surv(dtime,death))
+
+rotterdam2.surv <- with(rotterdam2,Surv(time=tstart,time2=tstop, event=status,type="counting"))
+
+summary(rotterdam1)
+str(rotterdam1)
+
+summary(rotterdam2)
+str(rotterdam2)
+```
+
+## Survivial Analysis
+
+```{r}
+plot(survfit(rotterdam1.surv~nodes_cate,data=rotterdam1),col=1:3,lwd=2)
+title("Survival proportion for Nodes")
+legend("topright",c("0-1", "2-4", "above 4"),col=1:3,lwd=2)
+
+plot(survfit(rotterdam1.surv~pgr_cate,data=rotterdam1),col=1:3,lwd=2)
+title("Survival proportion for pgr")
+legend("topright",c("0-20", "21-130", "above 130"),col=1:3,lwd=2)
+
+plot(survfit(rotterdam1.surv~er_cate,data=rotterdam1),col=1:3,lwd=2)
+title("Survival proportion for er")
+legend("topright",c("0-10", "11-120", "above 120"),col=1:3,lwd=2)
+
+plot(survfit(rotterdam1.surv~size,data=rotterdam1),col=1:3,lwd=2)
+title("Survival proportion for Size")
+legend("topright",c("<=20","20-50",">50"),col=1:3,lwd=2)
+
+
+```
+
+## Model Building
+
+```{r}
+# Full model
+cox_full <- coxph(rotterdam1.surv ~ hormon*chemo+year+meno+size+pgr+er+nodes+grade+age, data = rotterdam1)
+summary(cox_full)
+AIC(cox_full)
+## year, meno, er and hoemon*chemo are not significant
+
+## Drop variables interpretations
+## year: The cancer is only based on your gender and age, not highly related to the year of surgery.
+## meno: Since meno is highly correlated with the age, we will also drop this variables
+## Node: Due to the unbalance distribution (Right Skewed)
+
+## Stratification Interpretation
+### Because size, pgr and er(after evenly cut) have intersection for the survival curves ,we do the stratification.
+
+```
+
+## Time-Independent Cox Model
+
+```{r}
+### After stepwise selection, the final time-dependent model is showed below.
+cox1 <- coxph(rotterdam1.surv ~ hormon*chemo+strata(size)+strata(pgr_cate)+strata(er_cate)+grade+age, data = rotterdam1)
+summary(cox1)
+# All predictors are significant even for the interaction of chemo and meno.
+
+AIC(cox1) 
+# AIC= 11076.21
+
+cox1.zph <- cox.zph(cox1)
+cox1.zph
+#From the score test, there is no significant evidence to show that non-proportionality for the predictors hormon, chem and their interaction, grade, age. All of their p-values are greater than 0.05.
+
+plot(cox1.zph)
+
+
+#fit without age
+cox2 <- coxph(rotterdam1.surv ~ hormon*chemo+strata(size)+strata(pgr_cate)+strata(er_cate)+grade, data = rotterdam1) #find residuals
+mres <- residuals(cox2, type = "martingale")
+#plot score vs residuals
+plot(rotterdam1$age,mres,xlab="Age",ylab="Martingale Residuals") 
+lines(lowess(rotterdam1$age,mres))
+title("Martingale Residuals vs. Age")
+```
+
+## Time-Dependent Cox Model
+
+```{r}
+cox2 <- coxph(rotterdam2.surv ~ hormon*chemo+strata(size)+strata(pgr_cate)+strata(er_cate)+grade+age+newrecur, data = rotterdam2)
+summary(cox2)
+# The grade and the interaction of chemo and hormon are not significant for the time-dependent model.
+
+AIC(cox2)
+# AIC = 8700.053
+
+
+cox2.zph <- cox.zph(cox2)
+cox2.zph
+#From the score test, there is no significant evidence to show that non-proportionality for the predictors hormon, chem and their interaction, grade, age. All of their p-values are greater than 0.05. However, recurrence might have an non-proportionality due to its lower p-value.
+
+
+# Time-Indep
+#fit without age
+cox3 <- coxph(rotterdam1.surv ~ hormon*chemo+strata(size)+strata(pgr_cate)+strata(er_cate)+grade, data = rotterdam1) #find residuals
+mres <- residuals(cox3, type = "martingale")
+#plot score vs residuals
+plot(rotterdam1$age,mres,xlab="Age",ylab="Martingale Residuals") 
+lines(lowess(rotterdam1$age,mres))
+title("Martingale Residuals vs. Age")
+
+# Time-Dep
+#fit without age
+cox4 <- coxph(rotterdam2.surv ~ hormon*chemo+strata(size)+strata(pgr_cate)+strata(er_cate)+grade+newrecur, data = rotterdam2) #find residuals
+mres3 <- residuals(cox4, type = "martingale")
+#plot score vs residuals
+plot(rotterdam2$age, mres3, xlab="Age", ylab="Martingale Residuals") 
+lines(lowess(rotterdam2$age,mres3))
+title("Martingale Residuals vs. Age")
+```
+
+
+### Model Checking
+
+```{r}
+# For time-independent cox model
+plot(cox1.zph[1], main = "Schoenfeld Residuals for Hormonal Treatment")
+plot(cox1.zph[2], main = "Schoenfeld Residuals for Chemotherapy")
+plot(cox1.zph[3], main = "Schoenfeld Residuals for Grade")
+plot(cox1.zph[4], main = "Schoenfeld Residuals for Age")
+plot(cox1.zph[5], main = "Schoenfeld Residuals for Treatment Interaction")
+
+```
+
+```{r}
+rotterdam.mart <- residuals(cox1, type="martingale")
+rotterdam.cs <- rotterdam1$death-rotterdam.mart
+
+surv.csr <- survfit(Surv(rotterdam.cs, rotterdam1$death)~1,type="fleming-harrington")
+plot(surv.csr,fun="cumhaz")
+abline(0,1)
+title("Cumulative Hazard of Cox-Snell Residuals")
+
+
+rotterdam.mart2 <- residuals(cox2, type="martingale")
+rotterdam.cs2 <- rotterdam2$death-rotterdam.mart2
+
+surv.csr2 <- survfit(Surv(rotterdam.cs2, rotterdam2$death)~1,type="fleming-harrington")
+plot(surv.csr2,fun="cumhaz")
+abline(0,1)
+title("Cumulative Hazard of Cox-Snell Residuals")
+
+```
+
+
+```{r}
+#fit residuals: martingale, deviance, and df beta
+rotterdam.mart <- residuals(cox1, type="martingale")
+rotterdam.dev  <- residuals(cox1, type="deviance") 
+rotterdam.dfb  <- residuals(cox1, type="dfbeta")
+rotterdam.preds <- predict(cox1)
+
+#the martingale residuals vs. the linear predictor
+plot(rotterdam.preds, rotterdam.mart, xlab="Linear Predictor", 
+     ylab="Martingale Residual", ylim = c(-3, 1.5), pch = 16, cex = 0.5, col = "orange")
+#title("Martingale Residuals vs. Linear Predictor") 
+text(rotterdam.preds, rotterdam.mart+0.2, labels = rownames(rotterdam1), cex = 0.7)
+
+#the deviance residuals vs. the linear predictor
+plot(rotterdam.preds, rotterdam.dev, xlab="Linear Predictor", 
+     ylab="Deviance Residual", ylim = c(-2.5,3.5), pch = 16, cex = 0.5,  col = "orange")
+#title("Deviance Residuals vs. Linear Predictor") 
+text(rotterdam.preds, rotterdam.dev+0.2, labels = rownames(rotterdam1),cex = 0.7)
+
+
+plot(rotterdam.dfb[,1],xlab="Observation Number", ylab="dfbeta for Hormonal Treatment",
+ylim=c(-0.01,0.01), pch = 16, cex = 0.5,  col = "orange")
+#title("dfbeta Values by Observation Number for Hormonal Treatment") 
+text(rotterdam.dfb[,1]+0.002, labels = rownames(rotterdam1),cex = 0.7)
+
+plot(rotterdam.dfb[,2],xlab="Observation Number", ylab="dfbeta for Chemotherapy",
+ylim=c(-0.01,0.01), pch = 16, cex = 0.5, col = "orange")
+#title("dfbeta Values by Observation Number for Chemotherapy") 
+text(rotterdam.dfb[,2]+0.002, labels = rownames(rotterdam1),cex = 0.7)
+
+plot(rotterdam.dfb[,3],xlab="Observation Number", ylab="dfbeta for Differentiation Grade",
+ylim=c(-0.005,0.01), pch = 19, cex = 0.5, col = "orange")
+#title("dfbeta Values by Observation Number for Differentiation Grade") 
+text(rotterdam.dfb[,3]+0.002, labels = rownames(rotterdam1), cex = 0.7)
+
+plot(rotterdam.dfb[,4],xlab="Observation Number", ylab="dfbeta for Age",
+ylim=c(0.0017,0.0022), pch = 19, cex = 0.5, col = "orange")
+#title("dfbeta Values by Observation Number for Age") 
+text(rotterdam.dfb[,4]+0.002, labels = rownames(rotterdam1),cex = 0.7)
+
+plot(rotterdam.dfb[,5],xlab="Observation Number", ylab="dfbeta for Treatment Interaction ",
+ylim=c(-0.1,0.12), pch = 19, cex = 0.5, col = "orange")
+#title("dfbeta Values by Observation Number for Treatment Interaction") 
+text(rotterdam.dfb[,5]+0.002, labels = rownames(rotterdam1),cex = 0.7)
+
+```
+
+### Observations to Examine by Residuals and Influence:
+
+- **Martingale Residuals:** 2277, 2358
+- **Deviance Residuals:** 2818
+- **Hormonal Treatment Influence:** 2146
+- **Chemotherapy Influence:** 2571, 1482, 2277
+- **Grade Influence:** 476, 2046
+- **Age Influence:** 2872, 2941
+- **Interaction Influence:** 2085, 1091, 1820
+The most important observations to examine seem to be 2277
+
+```{r}
+unusuals <- c(2277) 
+rotterdam1[unusuals, ]
+```
+
+
+
+
